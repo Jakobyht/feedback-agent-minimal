@@ -1,0 +1,13 @@
+{
+  "name": "feedback-agent-minimal",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "scripts": {
+    "watch": "node local-agent/watch.js",
+    "check": "node --check local-agent/watch.js && deno check supabase/functions/feedback-to-issue/index.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

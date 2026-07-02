@@ -1,0 +1,4 @@
+node_modules/
+.agent-state/
+.env
+.DS_Store
