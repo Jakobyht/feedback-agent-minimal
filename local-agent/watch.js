@@ -38,8 +38,8 @@ async function poll() {
 }
 
 async function runIssue(issue) {
-  await removeLabel(issue.number, readyLabel);
   await addLabel(issue.number, runningLabel);
+  await removeLabel(issue.number, readyLabel);
   await comment(issue.number, "Agent started on local machine.");
 
   const runDir = path.join(stateDir, `issue-${issue.number}`);
@@ -91,7 +91,11 @@ async function getIssues() {
   url.searchParams.set("per_page", "20");
 
   const result = await github("GET", `${url.pathname}${url.search}`);
-  return result.filter((issue) => !issue.pull_request);
+  return result.filter((issue) => {
+    if (issue.pull_request) return false;
+    const labels = issue.labels.map((label) => label.name);
+    return !labels.includes(runningLabel) && !labels.includes(doneLabel) && !labels.includes(failedLabel);
+  });
 }
 
 async function addLabel(issueNumber, label) {

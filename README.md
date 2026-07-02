@@ -24,8 +24,9 @@ Compute:
 1. Your app inserts a row into `public.feedback`.
 2. Supabase Database Webhook sends the inserted row to the Edge Function.
 3. The Edge Function checks whether this feedback row already has a GitHub issue.
-4. If not, it creates a GitHub issue labeled `agent-ready`.
-5. It writes the created issue URL and issue number back to the Supabase row.
+4. It also searches GitHub for an existing issue containing the same feedback row ID.
+5. If no issue exists, it creates a GitHub issue labeled `agent-ready`.
+6. It writes the created issue URL and issue number back to the Supabase row.
 
 This makes webhook retries safer: if Supabase calls the function again for the
 same feedback row, the function returns the existing issue instead of creating a
@@ -44,12 +45,13 @@ local-agent/watch.js
 Compute:
 
 1. Polls GitHub for open issues labeled `agent-ready`.
-2. Removes `agent-ready`.
+2. Ignores issues that already have `agent-running`, `agent-done`, or `agent-failed`.
 3. Adds `agent-running`.
-4. Writes the issue text to a local prompt file.
-5. Starts the coding agent and waits for its exit code.
-6. On exit code `0`, removes `agent-running`, adds `agent-done`, and comments.
-7. On non-zero exit, removes `agent-running`, adds `agent-failed`, and comments.
+4. Removes `agent-ready`.
+5. Writes the issue text to a local prompt file.
+6. Starts the coding agent and waits for its exit code.
+7. On exit code `0`, removes `agent-running`, adds `agent-done`, and comments.
+8. On non-zero exit, removes `agent-running`, adds `agent-failed`, and comments.
 
 GitHub labels are the durable state machine:
 
@@ -163,10 +165,12 @@ This repo provides:
 
 1. Persistent source event: the Supabase `feedback` row.
 2. Idempotency check: Product 1 checks `github_issue_url` before creating an issue.
-3. Durable work queue: GitHub issues with labels.
-4. Durable issue state: `agent-ready`, `agent-running`, `agent-done`, `agent-failed`.
-5. Agent exit handling: Product 2 waits for the agent process and records success or failure.
-6. No public Mac mini endpoint: the Mac mini makes outbound HTTPS requests to GitHub.
+3. Duplicate reduction: Product 1 searches GitHub for the feedback row ID before creating an issue.
+4. Durable work queue: GitHub issues with labels.
+5. Durable issue state: `agent-ready`, `agent-running`, `agent-done`, `agent-failed`.
+6. Safer queue transition: Product 2 adds `agent-running` before removing `agent-ready`.
+7. Agent exit handling: Product 2 waits for the agent process and records success or failure.
+8. No public Mac mini endpoint: the Mac mini makes outbound HTTPS requests to GitHub.
 
 ## Operational limits
 
@@ -176,7 +180,7 @@ Known limits:
 
 1. Run only one watcher per repo unless you add a stronger distributed lock.
 2. If the Mac mini loses power while an issue has `agent-running`, an operator must inspect it and relabel it to `agent-ready` if it should retry.
-3. If GitHub issue creation succeeds but the Supabase update fails, a duplicate can still happen on a webhook retry. This is rare but possible without one transaction spanning GitHub and Supabase.
+3. If GitHub issue creation succeeds but the Supabase update fails, Product 1 searches GitHub for the existing feedback row ID on retry. This reduces duplicates, but GitHub search is not a formal cross-system transaction.
 4. The agent itself is not sandboxed by this repo. Run it under a dedicated OS user and only give it access to the intended repo.
 
 ## Where compute runs
