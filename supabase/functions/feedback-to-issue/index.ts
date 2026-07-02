@@ -2,6 +2,8 @@ const owner = required("GITHUB_OWNER");
 const repo = required("GITHUB_REPO");
 const token = required("GITHUB_TOKEN");
 const secret = required("WEBHOOK_SECRET");
+const supabaseUrl = required("SUPABASE_URL");
+const serviceRoleKey = required("SUPABASE_SERVICE_ROLE_KEY");
 
 Deno.serve(async (request) => {
   if (request.method !== "POST") return response({ error: "method_not_allowed" }, 405);
@@ -9,7 +11,12 @@ Deno.serve(async (request) => {
 
   const event = await request.json();
   const row = event.record;
-  if (!row?.message) return response({ error: "missing_message" }, 422);
+  if (!row?.id || !row?.message) return response({ error: "missing_feedback_row" }, 422);
+
+  const current = await getFeedbackRow(row.id);
+  if (current.github_issue_url) {
+    return response({ ok: true, skipped: "already_created", issue: current.github_issue_url });
+  }
 
   const github = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues`, {
     method: "POST",
@@ -26,16 +33,59 @@ Deno.serve(async (request) => {
         "",
         `Page: ${row.page_url || "not provided"}`,
         `User: ${row.user_email || "not provided"}`,
-        `Feedback row: ${row.id || "not provided"}`
+        `Feedback row: ${row.id}`
       ].join("\n"),
       labels: ["agent-ready"]
     })
   });
 
-  if (!github.ok) return response({ error: await github.text() }, 502);
+  if (!github.ok) {
+    const error = await github.text();
+    await updateFeedbackRow(row.id, { status: "github_failed", github_error: error });
+    return response({ error }, 502);
+  }
+
   const issue = await github.json();
+  await updateFeedbackRow(row.id, {
+    status: "github_issue_created",
+    github_issue_url: issue.html_url,
+    github_issue_number: issue.number,
+    github_error: null
+  });
+
   return response({ ok: true, issue: issue.html_url });
 });
+
+async function getFeedbackRow(id: string) {
+  const result = await fetch(`${supabaseUrl}/rest/v1/feedback?id=eq.${encodeURIComponent(id)}&select=id,github_issue_url`, {
+    headers: authHeaders()
+  });
+
+  if (!result.ok) throw new Error(await result.text());
+  const rows = await result.json();
+  return rows[0] || {};
+}
+
+async function updateFeedbackRow(id: string, patch: Record<string, unknown>) {
+  const result = await fetch(`${supabaseUrl}/rest/v1/feedback?id=eq.${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: {
+      ...authHeaders(),
+      "content-type": "application/json",
+      prefer: "return=minimal"
+    },
+    body: JSON.stringify(patch)
+  });
+
+  if (!result.ok) throw new Error(await result.text());
+}
+
+function authHeaders() {
+  return {
+    apikey: serviceRoleKey,
+    authorization: `Bearer ${serviceRoleKey}`
+  };
+}
 
 function required(name: string) {
   const value = Deno.env.get(name);

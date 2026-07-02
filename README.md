@@ -1,12 +1,12 @@
 # Feedback Agent Minimal
 
-Minimal feedback-to-agent pipeline.
+Production-oriented feedback-to-agent pipeline.
 
 ```text
 app -> Supabase feedback row -> GitHub issue -> local watcher -> coding agent
 ```
 
-There are two small programs.
+The system has two programs.
 
 ## Program 1: Supabase row to GitHub issue
 
@@ -19,12 +19,17 @@ supabase/sql/feedback.sql
 supabase/functions/feedback-to-issue/index.ts
 ```
 
-What it does:
+Compute:
 
 1. Your app inserts a row into `public.feedback`.
-2. Supabase Database Webhook calls the Edge Function.
-3. The Edge Function creates a GitHub issue.
-4. The issue gets the label `agent-ready`.
+2. Supabase Database Webhook sends the inserted row to the Edge Function.
+3. The Edge Function checks whether this feedback row already has a GitHub issue.
+4. If not, it creates a GitHub issue labeled `agent-ready`.
+5. It writes the created issue URL and issue number back to the Supabase row.
+
+This makes webhook retries safer: if Supabase calls the function again for the
+same feedback row, the function returns the existing issue instead of creating a
+second one.
 
 ## Program 2: GitHub issue to local agent
 
@@ -36,30 +41,28 @@ File:
 local-agent/watch.js
 ```
 
-What it does:
+Compute:
 
 1. Polls GitHub for open issues labeled `agent-ready`.
-2. Writes the issue text to a local prompt file.
-3. Starts your coding agent with that prompt file.
-4. Records the issue ID so it is not started twice.
+2. Removes `agent-ready`.
+3. Adds `agent-running`.
+4. Writes the issue text to a local prompt file.
+5. Starts the coding agent and waits for its exit code.
+6. On exit code `0`, removes `agent-running`, adds `agent-done`, and comments.
+7. On non-zero exit, removes `agent-running`, adds `agent-failed`, and comments.
+
+GitHub labels are the durable state machine:
+
+```text
+agent-ready -> agent-running -> agent-done
+agent-ready -> agent-running -> agent-failed
+```
 
 ## Setup
 
 ### 1. Create the Supabase table
 
 Open Supabase SQL Editor and run:
-
-```sql
-create table if not exists public.feedback (
-  id uuid primary key default gen_random_uuid(),
-  message text not null,
-  page_url text,
-  user_email text,
-  created_at timestamptz not null default now()
-);
-```
-
-Or paste the contents of:
 
 ```text
 supabase/sql/feedback.sql
@@ -78,10 +81,21 @@ supabase secrets set GITHUB_OWNER="your-github-user-or-org"
 supabase secrets set GITHUB_REPO="your-app-repo"
 supabase secrets set GITHUB_TOKEN="github-token-with-issues-write"
 supabase secrets set WEBHOOK_SECRET="long-random-secret"
+supabase secrets set SUPABASE_SERVICE_ROLE_KEY="your-supabase-service-role-key"
 ```
 
+Supabase automatically provides `SUPABASE_URL` to Edge Functions.
+
 The GitHub repo can be the same private repo that contains your app code.
-The token only needs issue permissions for Program 1.
+
+Program 1 GitHub token:
+
+```text
+Repository access: only your app repo
+Permissions: Issues read/write
+```
+
+It does not need code read/write access.
 
 ### 3. Create the Supabase Database Webhook
 
@@ -113,6 +127,8 @@ await supabase.from("feedback").insert({
 });
 ```
 
+Your app does not receive or store the GitHub token.
+
 ### 5. Run the local watcher
 
 Install Node.js 20 or newer.
@@ -121,10 +137,13 @@ Install Node.js 20 or newer.
 npm install
 GITHUB_OWNER="your-github-user-or-org" \
 GITHUB_REPO="your-app-repo" \
-GITHUB_TOKEN="github-token-with-issues-read" \
+GITHUB_TOKEN="github-token-with-issues-write" \
 AGENT_REPO="/absolute/path/to/your/local/app/repo" \
 npm run watch
 ```
+
+Program 2 needs issue write permission because it changes labels and posts
+comments.
 
 Default agent command:
 
@@ -138,23 +157,59 @@ Override it:
 AGENT_COMMAND='codex exec "$(cat "$PROMPT_FILE")"' npm run watch
 ```
 
-## Minimal correctness
+## Production guarantees
 
-This system is correct if:
+This repo provides:
 
-1. Every valid inserted feedback row creates a GitHub issue.
-2. Every unprocessed `agent-ready` issue starts one local agent process.
-3. Processed issue IDs are persisted locally so they are not started twice.
+1. Persistent source event: the Supabase `feedback` row.
+2. Idempotency check: Product 1 checks `github_issue_url` before creating an issue.
+3. Durable work queue: GitHub issues with labels.
+4. Durable issue state: `agent-ready`, `agent-running`, `agent-done`, `agent-failed`.
+5. Agent exit handling: Product 2 waits for the agent process and records success or failure.
+6. No public Mac mini endpoint: the Mac mini makes outbound HTTPS requests to GitHub.
+
+## Operational limits
+
+This is production-oriented but intentionally small.
+
+Known limits:
+
+1. Run only one watcher per repo unless you add a stronger distributed lock.
+2. If the Mac mini loses power while an issue has `agent-running`, an operator must inspect it and relabel it to `agent-ready` if it should retry.
+3. If GitHub issue creation succeeds but the Supabase update fails, a duplicate can still happen on a webhook retry. This is rare but possible without one transaction spanning GitHub and Supabase.
+4. The agent itself is not sandboxed by this repo. Run it under a dedicated OS user and only give it access to the intended repo.
 
 ## Where compute runs
 
 ```text
-App insert: user's browser or app server CPU
-Database write: Supabase Postgres CPU and disk
-Issue creation: Supabase Edge Function CPU, then GitHub API
-Issue polling: your laptop/Mac mini CPU, then GitHub API
-Agent process: your laptop/Mac mini CPU; GPU only if your agent uses a local GPU model
+App insert:
+  user's browser CPU or app server CPU
+
+Database write:
+  Supabase Postgres CPU and disk
+
+Webhook dispatch:
+  Supabase infrastructure CPU
+
+Issue creation:
+  Supabase Edge Function CPU sends HTTPS request to GitHub API
+
+Issue storage:
+  GitHub server CPU and disk
+
+Issue polling:
+  Mac mini CPU sends HTTPS request to GitHub API
+
+Prompt file:
+  Mac mini CPU and disk
+
+Agent process:
+  Mac mini CPU
+  GPU only if the selected agent runs a local GPU model
 ```
 
-The Mac mini does not need a public domain. It makes outgoing HTTPS requests to
-GitHub.
+## Check code
+
+```bash
+npm run check
+```

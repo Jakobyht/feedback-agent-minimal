@@ -3,6 +3,10 @@ create table if not exists public.feedback (
   message text not null,
   page_url text,
   user_email text,
+  status text not null default 'new',
+  github_issue_url text,
+  github_issue_number integer,
+  github_error text,
   created_at timestamptz not null default now()
 );
 
