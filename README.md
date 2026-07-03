@@ -50,9 +50,12 @@ Compute:
 4. Removes `agent-ready`.
 5. Writes a strict triage prompt to a local prompt file.
 6. Starts Codex and waits for its exit code.
-7. Codex decides whether to fix, ask clarification, ask for scope, mark duplicate, or request human review.
-8. If Codex exits `0` without a final decision label, the heartbeat adds `needs-human-review`.
-9. If Codex exits non-zero, the heartbeat adds `agent-failed`.
+7. Codex inspects the issue and the local repository.
+8. If Codex can find the problem in the program, it changes code, runs checks, and opens a pull request.
+9. If the feedback is subjective, a preference, a future idea, or not verifiable as a defect, Codex does not change product code. It opens a documentation-only pull request that adds the feedback to `unrealized-feedback.md`.
+10. Codex can also ask clarification, ask for scope, mark duplicate, or request human review.
+11. If Codex exits `0` without a final decision label, the heartbeat adds `needs-human-review`.
+12. If Codex exits non-zero, the heartbeat adds `agent-failed`.
 
 GitHub labels are the durable state machine:
 
@@ -174,11 +177,12 @@ This repo provides:
 3. Duplicate reduction: Product 1 searches GitHub for the feedback row ID before creating an issue.
 4. Durable work queue: GitHub issues with labels.
 5. Durable issue state: `agent-ready`, `agent-triaging`, `agent-done`, `agent-failed`, `needs-clarification`, `needs-scope`, `needs-human-review`, `duplicate`.
-6. Triage before code: Codex must decide whether the issue is actionable before editing.
-7. Safer queue transition: Product 2 adds `agent-triaging` before removing `agent-ready`.
-8. Post-condition check: after Codex exits, every issue must have a final decision label or `needs-human-review`.
-9. Agent exit handling: Product 2 waits for the Codex process and records process failure.
-10. No public Mac mini endpoint: the Mac mini makes outbound HTTPS requests to GitHub.
+6. Evidence before code: Codex must inspect the repository and find an objective issue before editing product code.
+7. Subjective feedback preservation: Codex stores subjective or unrealized feedback in `unrealized-feedback.md` through a documentation-only pull request.
+8. Safer queue transition: Product 2 adds `agent-triaging` before removing `agent-ready`.
+9. Post-condition check: after Codex exits, every issue must have a final decision label or `needs-human-review`.
+10. Agent exit handling: Product 2 waits for the Codex process and records process failure.
+11. No public Mac mini endpoint: the Mac mini makes outbound HTTPS requests to GitHub.
 
 ## Operational limits
 
