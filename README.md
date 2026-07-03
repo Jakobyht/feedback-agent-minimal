@@ -3,7 +3,7 @@
 Production-oriented feedback-to-agent pipeline.
 
 ```text
-app -> Supabase feedback row -> GitHub issue -> local watcher -> coding agent
+app -> Supabase feedback row -> GitHub issue -> Codex heartbeat -> PR or triage label
 ```
 
 The system has two programs.
@@ -32,7 +32,7 @@ This makes webhook retries safer: if Supabase calls the function again for the
 same feedback row, the function returns the existing issue instead of creating a
 second one.
 
-## Program 2: GitHub issue to local agent
+## Program 2: GitHub issue to Codex heartbeat
 
 Runs on your laptop or Mac mini.
 
@@ -45,19 +45,24 @@ local-agent/watch.js
 Compute:
 
 1. Polls GitHub for open issues labeled `agent-ready`.
-2. Ignores issues that already have `agent-running`, `agent-done`, or `agent-failed`.
-3. Adds `agent-running`.
+2. Ignores issues that already have a terminal or in-progress label.
+3. Adds `agent-triaging`.
 4. Removes `agent-ready`.
-5. Writes the issue text to a local prompt file.
-6. Starts the coding agent and waits for its exit code.
-7. On exit code `0`, removes `agent-running`, adds `agent-done`, and comments.
-8. On non-zero exit, removes `agent-running`, adds `agent-failed`, and comments.
+5. Writes a strict triage prompt to a local prompt file.
+6. Starts Codex and waits for its exit code.
+7. Codex decides whether to fix, ask clarification, ask for scope, mark duplicate, or request human review.
+8. If Codex exits `0` without a final decision label, the heartbeat adds `needs-human-review`.
+9. If Codex exits non-zero, the heartbeat adds `agent-failed`.
 
 GitHub labels are the durable state machine:
 
 ```text
-agent-ready -> agent-running -> agent-done
-agent-ready -> agent-running -> agent-failed
+agent-ready -> agent-triaging -> agent-done
+agent-ready -> agent-triaging -> needs-clarification
+agent-ready -> agent-triaging -> needs-scope
+agent-ready -> agent-triaging -> duplicate
+agent-ready -> agent-triaging -> needs-human-review
+agent-ready -> agent-triaging -> agent-failed
 ```
 
 ## Setup
@@ -145,18 +150,19 @@ npm run watch
 ```
 
 Program 2 needs issue write permission because it changes labels and posts
-comments.
+comments. If Codex will open pull requests, the machine also needs normal git
+push permission for the repo.
 
 Default agent command:
 
 ```bash
-claude -p "$(cat "$PROMPT_FILE")"
+codex exec "$(cat "$PROMPT_FILE")"
 ```
 
 Override it:
 
 ```bash
-AGENT_COMMAND='codex exec "$(cat "$PROMPT_FILE")"' npm run watch
+AGENT_COMMAND='claude -p "$(cat "$PROMPT_FILE")"' npm run watch
 ```
 
 ## Production guarantees
@@ -167,10 +173,12 @@ This repo provides:
 2. Idempotency check: Product 1 checks `github_issue_url` before creating an issue.
 3. Duplicate reduction: Product 1 searches GitHub for the feedback row ID before creating an issue.
 4. Durable work queue: GitHub issues with labels.
-5. Durable issue state: `agent-ready`, `agent-running`, `agent-done`, `agent-failed`.
-6. Safer queue transition: Product 2 adds `agent-running` before removing `agent-ready`.
-7. Agent exit handling: Product 2 waits for the agent process and records success or failure.
-8. No public Mac mini endpoint: the Mac mini makes outbound HTTPS requests to GitHub.
+5. Durable issue state: `agent-ready`, `agent-triaging`, `agent-done`, `agent-failed`, `needs-clarification`, `needs-scope`, `needs-human-review`, `duplicate`.
+6. Triage before code: Codex must decide whether the issue is actionable before editing.
+7. Safer queue transition: Product 2 adds `agent-triaging` before removing `agent-ready`.
+8. Post-condition check: after Codex exits, every issue must have a final decision label or `needs-human-review`.
+9. Agent exit handling: Product 2 waits for the Codex process and records process failure.
+10. No public Mac mini endpoint: the Mac mini makes outbound HTTPS requests to GitHub.
 
 ## Operational limits
 
@@ -179,7 +187,7 @@ This is production-oriented but intentionally small.
 Known limits:
 
 1. Run only one watcher per repo unless you add a stronger distributed lock.
-2. If the Mac mini loses power while an issue has `agent-running`, an operator must inspect it and relabel it to `agent-ready` if it should retry.
+2. If the Mac mini loses power while an issue has `agent-triaging`, an operator must inspect it and relabel it to `agent-ready` if it should retry.
 3. If GitHub issue creation succeeds but the Supabase update fails, Product 1 searches GitHub for the existing feedback row ID on retry. This reduces duplicates, but GitHub search is not a formal cross-system transaction.
 4. The agent itself is not sandboxed by this repo. Run it under a dedicated OS user and only give it access to the intended repo.
 
@@ -207,7 +215,7 @@ Issue polling:
 Prompt file:
   Mac mini CPU and disk
 
-Agent process:
+Codex process:
   Mac mini CPU
   GPU only if the selected agent runs a local GPU model
 ```

@@ -7,18 +7,23 @@ const repo = env("GITHUB_REPO");
 const token = env("GITHUB_TOKEN");
 const agentRepo = path.resolve(env("AGENT_REPO"));
 const readyLabel = process.env.GITHUB_READY_LABEL || "agent-ready";
+const triagingLabel = process.env.GITHUB_TRIAGING_LABEL || "agent-triaging";
 const runningLabel = process.env.GITHUB_RUNNING_LABEL || "agent-running";
 const doneLabel = process.env.GITHUB_DONE_LABEL || "agent-done";
 const failedLabel = process.env.GITHUB_FAILED_LABEL || "agent-failed";
+const needsClarificationLabel = process.env.GITHUB_NEEDS_CLARIFICATION_LABEL || "needs-clarification";
+const needsScopeLabel = process.env.GITHUB_NEEDS_SCOPE_LABEL || "needs-scope";
+const needsHumanReviewLabel = process.env.GITHUB_NEEDS_HUMAN_REVIEW_LABEL || "needs-human-review";
+const duplicateLabel = process.env.GITHUB_DUPLICATE_LABEL || "duplicate";
 const pollMs = Number(process.env.POLL_MS || 60000);
-const agentCommand = process.env.AGENT_COMMAND || 'claude -p "$(cat "$PROMPT_FILE")"';
+const agentCommand = process.env.AGENT_COMMAND || 'codex exec "$(cat "$PROMPT_FILE")"';
 
 const stateDir = path.join(agentRepo, ".agent-state");
 let polling = false;
 
 await fs.mkdir(stateDir, { recursive: true });
 
-console.log(`Watching ${owner}/${repo} for label ${readyLabel}`);
+console.log(`Heartbeat watching ${owner}/${repo} for label ${readyLabel}`);
 await poll();
 setInterval(() => poll().catch((error) => console.error(error)), pollMs);
 
@@ -38,9 +43,9 @@ async function poll() {
 }
 
 async function runIssue(issue) {
-  await addLabel(issue.number, runningLabel);
+  await addLabel(issue.number, triagingLabel);
   await removeLabel(issue.number, readyLabel);
-  await comment(issue.number, "Agent started on local machine.");
+  await comment(issue.number, "Heartbeat claimed this issue for Codex triage.");
 
   const runDir = path.join(stateDir, `issue-${issue.number}`);
   await fs.mkdir(runDir, { recursive: true });
@@ -51,12 +56,21 @@ async function runIssue(issue) {
 
   const exitCode = await runAgent(promptFile, logFile);
 
-  await removeLabel(issue.number, runningLabel);
+  await removeLabel(issue.number, triagingLabel);
 
   if (exitCode === 0) {
-    await addLabel(issue.number, doneLabel);
-    await comment(issue.number, `Agent finished successfully. Local log: ${logFile}`);
-    console.log(`agent finished issue #${issue.number}`);
+    const finalIssue = await getIssue(issue.number);
+    const finalLabels = finalIssue.labels.map((label) => label.name);
+
+    if (!hasTerminalLabel(finalLabels)) {
+      await addLabel(issue.number, needsHumanReviewLabel);
+      await comment(issue.number, `Codex exited successfully but did not leave a final decision label. Added ${needsHumanReviewLabel}. Local log: ${logFile}`);
+      console.log(`heartbeat needs human review for issue #${issue.number}`);
+      return;
+    }
+
+    await comment(issue.number, `Heartbeat finished. Local log: ${logFile}`);
+    console.log(`heartbeat finished issue #${issue.number}`);
     return;
   }
 
@@ -94,8 +108,21 @@ async function getIssues() {
   return result.filter((issue) => {
     if (issue.pull_request) return false;
     const labels = issue.labels.map((label) => label.name);
-    return !labels.includes(runningLabel) && !labels.includes(doneLabel) && !labels.includes(failedLabel);
+    return !labels.includes(triagingLabel) && !labels.includes(runningLabel) && !hasTerminalLabel(labels);
   });
+}
+
+async function getIssue(issueNumber) {
+  return await github("GET", `/repos/${owner}/${repo}/issues/${issueNumber}`);
+}
+
+function hasTerminalLabel(labels) {
+  return labels.includes(doneLabel) ||
+    labels.includes(failedLabel) ||
+    labels.includes(needsClarificationLabel) ||
+    labels.includes(needsScopeLabel) ||
+    labels.includes(needsHumanReviewLabel) ||
+    labels.includes(duplicateLabel);
 }
 
 async function addLabel(issueNumber, label) {
@@ -143,11 +170,35 @@ function githubHeaders() {
 
 function formatPrompt(issue) {
   return [
-    `Fix GitHub issue #${issue.number}: ${issue.title}`,
+    `You are the Codex heartbeat worker for GitHub issue #${issue.number}.`,
     "",
+    "Repository:",
+    `${owner}/${repo}`,
+    "",
+    "Issue URL:",
     issue.html_url,
     "",
-    issue.body || ""
+    "Title:",
+    issue.title,
+    "",
+    "Body:",
+    issue.body || "",
+    "",
+    "Required behavior:",
+    "1. Inspect the issue and the local repository.",
+    "2. Decide exactly one outcome:",
+    `   - actionable: implement the fix on a branch, run checks, open a pull request, comment with the PR URL, remove ${triagingLabel}, add ${doneLabel}.`,
+    `   - unclear: ask a specific question, remove ${triagingLabel}, add ${needsClarificationLabel}.`,
+    `   - too broad: explain the smaller needed scope, remove ${triagingLabel}, add ${needsScopeLabel}.`,
+    `   - duplicate: link the existing issue or PR, remove ${triagingLabel}, add ${duplicateLabel}.`,
+    `   - unsafe or risky: explain the risk, remove ${triagingLabel}, add ${needsHumanReviewLabel}.`,
+    "",
+    "Rules:",
+    "- Do not push to main.",
+    "- Do not make code changes unless the issue is actionable.",
+    "- Prefer a small PR over a broad rewrite.",
+    "- Leave a GitHub comment explaining the decision.",
+    "- Use GitHub CLI if available for labels, comments, branches, and PRs."
   ].join("\n");
 }
 
